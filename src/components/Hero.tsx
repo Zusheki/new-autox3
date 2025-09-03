@@ -1,5 +1,5 @@
 import React from 'react';
-import { Truck, Package, Users, Star, CheckCircle, ArrowRight, Shield, Clock, Award, Phone, Mail, MapPin, Search } from 'lucide-react';
+import { Truck, Package, Users, Star, CheckCircle, ArrowRight, Shield, Clock, Award, Search } from 'lucide-react';
 
 interface HeroProps {
   onServiceSelect: (service: 'materials' | 'vehicles') => void;

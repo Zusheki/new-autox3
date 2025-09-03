@@ -2,15 +2,21 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const { body, validationResult } = require('express-validator');
-const User = require('../models/User');
+const { User, ServiceRequest } = require('../models');
+const { Op } = require('sequelize');
 
 // @route   GET /api/users/profile
 // @desc    Get user profile
 // @access  Private
 router.get('/profile', auth, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-password');
-    res.json(user);
+    const user = await User.findByPk(req.user.id, {
+      attributes: { exclude: ['password'] }
+    });
+    res.json({
+      success: true,
+      user: user
+    });
   } catch (error) {
     console.error(error.message);
     res.status(500).send('Server Error');
@@ -38,23 +44,28 @@ router.put('/profile', [
   try {
     // Check if email is already taken by another user
     const existingUser = await User.findOne({ 
-      email, 
-      _id: { $ne: req.user.id } 
+      where: {
+        email,
+        id: { [Op.ne]: req.user.id }
+      }
     });
     
     if (existingUser) {
       return res.status(400).json({ 
-        msg: 'Email is already registered to another account' 
+        success: false,
+        message: 'Email is already registered to another account' 
       });
     }
 
-    const user = await User.findByIdAndUpdate(
-      req.user.id,
-      { name, email, phone, address },
-      { new: true }
-    ).select('-password');
+    await req.user.update({ name, email, phone, address });
+    const user = await User.findByPk(req.user.id, {
+      attributes: { exclude: ['password'] }
+    });
 
-    res.json(user);
+    res.json({
+      success: true,
+      user: user
+    });
   } catch (error) {
     console.error(error.message);
     res.status(500).send('Server Error');
@@ -66,13 +77,25 @@ router.put('/profile', [
 // @access  Private
 router.get('/orders', auth, async (req, res) => {
   try {
-    const ServiceRequest = require('../models/ServiceRequest');
-    
-    const orders = await ServiceRequest.find({ userId: req.user.id })
-      .populate('itemId')
-      .sort({ requestDate: -1 });
+    const orders = await ServiceRequest.findAll({
+      where: { userId: req.user.id },
+      include: [
+        {
+          model: Material,
+          as: 'material'
+        },
+        {
+          model: Vehicle,
+          as: 'vehicle'
+        }
+      ],
+      order: [['requestDate', 'DESC']]
+    });
 
-    res.json(orders);
+    res.json({
+      success: true,
+      data: orders
+    });
   } catch (error) {
     console.error(error.message);
     res.status(500).send('Server Error');
@@ -85,13 +108,15 @@ router.get('/orders', auth, async (req, res) => {
 router.delete('/account', auth, async (req, res) => {
   try {
     // Remove user's service requests
-    const ServiceRequest = require('../models/ServiceRequest');
-    await ServiceRequest.deleteMany({ userId: req.user.id });
+    await ServiceRequest.destroy({ where: { userId: req.user.id } });
 
     // Remove user
-    await User.findByIdAndDelete(req.user.id);
+    await User.destroy({ where: { id: req.user.id } });
 
-    res.json({ msg: 'User account deleted successfully' });
+    res.json({ 
+      success: true,
+      message: 'User account deleted successfully' 
+    });
   } catch (error) {
     console.error(error.message);
     res.status(500).send('Server Error');

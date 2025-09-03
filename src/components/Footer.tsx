@@ -1,4 +1,5 @@
 import React from 'react';
+import { Truck, Package, Phone, Mail, MapPin, Clock } from 'lucide-react';
 
 type ViewType = 'home' | 'vehicles' | 'materials' | 'about' | 'contact' | 'signup';
 

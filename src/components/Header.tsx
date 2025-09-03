@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Truck, Package } from 'lucide-react';
 import { User as UserType } from '../types';
 
 type ViewType = 'home' | 'vehicles' | 'materials' | 'about' | 'contact' | 'signup' | 'dashboard' | 'profile' | 'confirmation' | 'services' | 'vehicle-listing' | 'material-listing' | 'vehicle-details' | 'vehicle-management' | 'material-management';

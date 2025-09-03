@@ -1,10 +1,9 @@
 const express = require('express');
 const { body, query, validationResult } = require('express-validator');
-const ServiceRequest = require('../models/ServiceRequest');
-const Material = require('../models/Material');
-const Vehicle = require('../models/Vehicle');
+const { ServiceRequest, Material, Vehicle, User, Partner } = require('../models');
 const auth = require('../middleware/auth');
 const sendEmail = require('../utils/sendEmail');
+const { Op } = require('sequelize');
 
 const router = express.Router();
 
@@ -32,8 +31,8 @@ router.post('/', auth, [
 
     const {
       type,
-      material: materialId,
-      vehicle: vehicleId,
+      materialId,
+      vehicleId,
       quantity,
       duration,
       durationType,
@@ -55,7 +54,7 @@ router.post('/', auth, [
       }
 
       // Check if material exists and is available
-      const material = await Material.findById(materialId);
+      const material = await Material.findByPk(materialId);
       if (!material || !material.isAvailable) {
         return res.status(400).json({
           success: false,
@@ -79,8 +78,8 @@ router.post('/', auth, [
       }
 
       // Check if vehicle exists and is available
-      const vehicle = await Vehicle.findById(vehicleId);
-      if (!vehicle || !vehicle.availability.isAvailable || vehicle.status !== 'active') {
+      const vehicle = await Vehicle.findByPk(vehicleId);
+      if (!vehicle || vehicle.status !== 'active') {
         return res.status(400).json({
           success: false,
           message: 'Vehicle not found or not available'
@@ -90,7 +89,7 @@ router.post('/', auth, [
 
     // Create service request
     const serviceRequestData = {
-      user: req.user.id,
+      userId: req.user.id,
       type,
       totalPrice,
       requiredDate,
@@ -101,10 +100,10 @@ router.post('/', auth, [
     };
 
     if (type === 'material') {
-      serviceRequestData.material = materialId;
+      serviceRequestData.materialId = materialId;
       serviceRequestData.quantity = quantity;
     } else {
-      serviceRequestData.vehicle = vehicleId;
+      serviceRequestData.vehicleId = vehicleId;
       serviceRequestData.duration = duration;
       serviceRequestData.durationType = durationType;
     }
@@ -112,11 +111,25 @@ router.post('/', auth, [
     const serviceRequest = await ServiceRequest.create(serviceRequestData);
     
     // Populate the request with item details
-    await serviceRequest.populate([
-      { path: 'user', select: 'name email phone' },
-      { path: 'material', select: 'name pricePerUnit unit supplier' },
-      { path: 'vehicle', select: 'name pricePerHour pricePerDay owner' }
-    ]);
+    await serviceRequest.reload({
+      include: [
+        {
+          model: User,
+          as: 'user',
+          attributes: ['name', 'email', 'phone']
+        },
+        {
+          model: Material,
+          as: 'material',
+          attributes: ['name', 'pricePerUnit', 'unit', 'supplierId']
+        },
+        {
+          model: Vehicle,
+          as: 'vehicle',
+          attributes: ['name', 'pricePerHour', 'pricePerDay', 'ownerId']
+        }
+      ]
+    });
 
     // Send confirmation email to user
     try {
@@ -171,27 +184,41 @@ router.get('/', auth, [
 
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-    const filter = { user: req.user.id };
+    const where = { userId: req.user.id };
 
     if (req.query.status) {
-      filter.status = req.query.status;
+      where.status = req.query.status;
     }
 
     if (req.query.type) {
-      filter.type = req.query.type;
+      where.type = req.query.type;
     }
 
-    const serviceRequests = await ServiceRequest.find(filter)
-      .populate('material', 'name pricePerUnit unit images')
-      .populate('vehicle', 'name pricePerHour pricePerDay images')
-      .populate('assignedTo', 'businessName contact rating')
-      .sort({ requestDate: -1 })
-      .skip(skip)
-      .limit(limit);
-
-    const total = await ServiceRequest.countDocuments(filter);
+    const { count, rows: serviceRequests } = await ServiceRequest.findAndCountAll({
+      where,
+      include: [
+        {
+          model: Material,
+          as: 'material',
+          attributes: ['name', 'pricePerUnit', 'unit', 'images']
+        },
+        {
+          model: Vehicle,
+          as: 'vehicle',
+          attributes: ['name', 'pricePerHour', 'pricePerDay', 'images']
+        },
+        {
+          model: Partner,
+          as: 'assignedPartner',
+          attributes: ['businessName', 'contact', 'rating']
+        }
+      ],
+      order: [['requestDate', 'DESC']],
+      offset,
+      limit
+    });
 
     res.json({
       success: true,
@@ -199,8 +226,8 @@ router.get('/', auth, [
       pagination: {
         page,
         limit,
-        total,
-        pages: Math.ceil(total / limit)
+        total: count,
+        pages: Math.ceil(count / limit)
       }
     });
   } catch (error) {
@@ -217,11 +244,30 @@ router.get('/', auth, [
 // @access  Private
 router.get('/:id', auth, async (req, res) => {
   try {
-    const serviceRequest = await ServiceRequest.findById(req.params.id)
-      .populate('user', 'name email phone')
-      .populate('material', 'name description pricePerUnit unit images supplier')
-      .populate('vehicle', 'name description pricePerHour pricePerDay images owner')
-      .populate('assignedTo', 'businessName contact rating address');
+    const serviceRequest = await ServiceRequest.findByPk(req.params.id, {
+      include: [
+        {
+          model: User,
+          as: 'user',
+          attributes: ['name', 'email', 'phone']
+        },
+        {
+          model: Material,
+          as: 'material',
+          attributes: ['name', 'description', 'pricePerUnit', 'unit', 'images', 'supplierId']
+        },
+        {
+          model: Vehicle,
+          as: 'vehicle',
+          attributes: ['name', 'description', 'pricePerHour', 'pricePerDay', 'images', 'ownerId']
+        },
+        {
+          model: Partner,
+          as: 'assignedPartner',
+          attributes: ['businessName', 'contact', 'rating', 'address']
+        }
+      ]
+    });
 
     if (!serviceRequest) {
       return res.status(404).json({
@@ -231,8 +277,8 @@ router.get('/:id', auth, async (req, res) => {
     }
 
     // Check if user owns this request or is the assigned partner
-    if (serviceRequest.user._id.toString() !== req.user.id && 
-        (!serviceRequest.assignedTo || serviceRequest.assignedTo._id.toString() !== req.user.partnerId)) {
+    if (serviceRequest.userId !== req.user.id && 
+        (!serviceRequest.assignedTo || serviceRequest.assignedTo !== req.user.partnerId)) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to view this service request'
@@ -245,12 +291,6 @@ router.get('/:id', auth, async (req, res) => {
     });
   } catch (error) {
     console.error('Get service request error:', error);
-    if (error.name === 'CastError') {
-      return res.status(404).json({
-        success: false,
-        message: 'Service request not found'
-      });
-    }
     res.status(500).json({
       success: false,
       message: 'Server error while fetching service request'
@@ -275,7 +315,7 @@ router.put('/:id/status', auth, [
       });
     }
 
-    const serviceRequest = await ServiceRequest.findById(req.params.id);
+    const serviceRequest = await ServiceRequest.findByPk(req.params.id);
 
     if (!serviceRequest) {
       return res.status(404).json({
@@ -289,7 +329,7 @@ router.put('/:id/status', auth, [
     // Check authorization based on status change
     if (status === 'cancelled') {
       // Only user can cancel
-      if (serviceRequest.user.toString() !== req.user.id) {
+      if (serviceRequest.userId !== req.user.id) {
         return res.status(403).json({
           success: false,
           message: 'Only the requester can cancel this request'
@@ -297,7 +337,7 @@ router.put('/:id/status', auth, [
       }
     } else {
       // Only assigned partner can update other statuses
-      if (!serviceRequest.assignedTo || serviceRequest.assignedTo.toString() !== req.user.partnerId) {
+      if (!serviceRequest.assignedTo || serviceRequest.assignedTo !== req.user.partnerId) {
         return res.status(403).json({
           success: false,
           message: 'Not authorized to update this service request'
@@ -370,7 +410,7 @@ router.post('/:id/feedback', auth, [
       });
     }
 
-    const serviceRequest = await ServiceRequest.findById(req.params.id);
+    const serviceRequest = await ServiceRequest.findByPk(req.params.id);
 
     if (!serviceRequest) {
       return res.status(404).json({
@@ -380,7 +420,7 @@ router.post('/:id/feedback', auth, [
     }
 
     // Check if user owns this request
-    if (serviceRequest.user.toString() !== req.user.id) {
+    if (serviceRequest.userId !== req.user.id) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to add feedback to this request'
