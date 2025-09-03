@@ -1,6 +1,6 @@
 const express = require('express');
 const { body, query, validationResult } = require('express-validator');
-const Material = require('../models/Material');
+const { Material, Partner } = require('../models');
 const auth = require('../middleware/auth');
 const partnerAuth = require('../middleware/partnerAuth');
 
@@ -29,51 +29,55 @@ router.get('/', [
 
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
     // Build filter object
-    const filter = { isAvailable: true };
+    const where = { isAvailable: true };
 
     if (req.query.category) {
-      filter.category = req.query.category;
+      where.category = req.query.category;
     }
 
-    if (req.query.minPrice || req.query.maxPrice) {
-      filter.pricePerUnit = {};
-      if (req.query.minPrice) filter.pricePerUnit.$gte = parseFloat(req.query.minPrice);
-      if (req.query.maxPrice) filter.pricePerUnit.$lte = parseFloat(req.query.maxPrice);
+    if (req.query.minPrice) {
+      where.pricePerUnit = { ...where.pricePerUnit, [Op.gte]: parseFloat(req.query.minPrice) };
+    }
+    
+    if (req.query.maxPrice) {
+      where.pricePerUnit = { ...where.pricePerUnit, [Op.lte]: parseFloat(req.query.maxPrice) };
     }
 
-    if (req.query.search) {
-      filter.$text = { $search: req.query.search };
-    }
-
-    // Build sort object
-    let sort = {};
+    // Build order array
+    let order = [];
     switch (req.query.sort) {
       case 'price_asc':
-        sort = { pricePerUnit: 1 };
+        order = [['pricePerUnit', 'ASC']];
         break;
       case 'price_desc':
-        sort = { pricePerUnit: -1 };
+        order = [['pricePerUnit', 'DESC']];
         break;
       case 'rating':
-        sort = { 'rating.average': -1 };
+        order = [['rating', 'DESC']];
         break;
       case 'newest':
-        sort = { createdAt: -1 };
+        order = [['createdAt', 'DESC']];
         break;
       default:
-        sort = { featured: -1, 'rating.average': -1 };
+        order = [['featured', 'DESC'], ['rating', 'DESC']];
     }
 
-    const materials = await Material.find(filter)
-      .populate('supplier', 'businessName rating')
-      .sort(sort)
-      .skip(skip)
-      .limit(limit);
-
-    const total = await Material.countDocuments(filter);
+    const { count, rows: materials } = await Material.findAndCountAll({
+      where,
+      include: [
+        {
+          model: Partner,
+          as: 'supplier',
+          attributes: ['businessName', 'rating']
+        }
+      ],
+      order,
+      offset,
+      limit
+    });
 
     res.json({
       success: true,
@@ -81,8 +85,8 @@ router.get('/', [
       pagination: {
         page,
         limit,
-        total,
-        pages: Math.ceil(total / limit)
+        total: count,
+        pages: Math.ceil(count / limit)
       }
     });
   } catch (error) {
@@ -99,9 +103,15 @@ router.get('/', [
 // @access  Public
 router.get('/:id', async (req, res) => {
   try {
-    const material = await Material.findById(req.params.id)
-      .populate('supplier', 'businessName contact rating address')
-      .populate('reviews');
+    const material = await Material.findByPk(req.params.id, {
+      include: [
+        {
+          model: Partner,
+          as: 'supplier',
+          attributes: ['businessName', 'contact', 'rating', 'address']
+        }
+      ]
+    });
 
     if (!material) {
       return res.status(404).json({
@@ -116,12 +126,6 @@ router.get('/:id', async (req, res) => {
     });
   } catch (error) {
     console.error('Get material error:', error);
-    if (error.name === 'CastError') {
-      return res.status(404).json({
-        success: false,
-        message: 'Material not found'
-      });
-    }
     res.status(500).json({
       success: false,
       message: 'Server error while fetching material'
@@ -152,11 +156,19 @@ router.post('/', [auth, partnerAuth], [
 
     const materialData = {
       ...req.body,
-      supplier: req.user.partnerId
+      supplierId: req.user.partnerId
     };
 
     const material = await Material.create(materialData);
-    await material.populate('supplier', 'businessName rating');
+    await material.reload({
+      include: [
+        {
+          model: Partner,
+          as: 'supplier',
+          attributes: ['businessName', 'rating']
+        }
+      ]
+    });
 
     res.status(201).json({
       success: true,
@@ -191,7 +203,7 @@ router.put('/:id', [auth, partnerAuth], [
       });
     }
 
-    const material = await Material.findById(req.params.id);
+    const material = await Material.findByPk(req.params.id);
 
     if (!material) {
       return res.status(404).json({
@@ -201,23 +213,28 @@ router.put('/:id', [auth, partnerAuth], [
     }
 
     // Check if user owns this material
-    if (material.supplier.toString() !== req.user.partnerId.toString()) {
+    if (material.supplierId !== req.user.partnerId) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to update this material'
       });
     }
 
-    const updatedMaterial = await Material.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true, runValidators: true }
-    ).populate('supplier', 'businessName rating');
+    await material.update(req.body);
+    await material.reload({
+      include: [
+        {
+          model: Partner,
+          as: 'supplier',
+          attributes: ['businessName', 'rating']
+        }
+      ]
+    });
 
     res.json({
       success: true,
       message: 'Material updated successfully',
-      data: updatedMaterial
+      data: material
     });
   } catch (error) {
     console.error('Update material error:', error);
@@ -233,7 +250,7 @@ router.put('/:id', [auth, partnerAuth], [
 // @access  Private (Partner)
 router.delete('/:id', [auth, partnerAuth], async (req, res) => {
   try {
-    const material = await Material.findById(req.params.id);
+    const material = await Material.findByPk(req.params.id);
 
     if (!material) {
       return res.status(404).json({
@@ -243,14 +260,14 @@ router.delete('/:id', [auth, partnerAuth], async (req, res) => {
     }
 
     // Check if user owns this material
-    if (material.supplier.toString() !== req.user.partnerId.toString()) {
+    if (material.supplierId !== req.user.partnerId) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to delete this material'
       });
     }
 
-    await Material.findByIdAndDelete(req.params.id);
+    await material.destroy();
 
     res.json({
       success: true,
@@ -270,7 +287,12 @@ router.delete('/:id', [auth, partnerAuth], async (req, res) => {
 // @access  Public
 router.get('/categories/list', async (req, res) => {
   try {
-    const categories = await Material.distinct('category');
+    const materials = await Material.findAll({
+      attributes: ['category'],
+      group: ['category']
+    });
+    
+    const categories = materials.map(m => m.category);
     
     res.json({
       success: true,

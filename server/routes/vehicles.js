@@ -1,8 +1,9 @@
 const express = require('express');
 const { body, query, validationResult } = require('express-validator');
-const Vehicle = require('../models/Vehicle');
+const { Vehicle, Partner } = require('../models');
 const auth = require('../middleware/auth');
 const partnerAuth = require('../middleware/partnerAuth');
+const { Op } = require('sequelize');
 
 const router = express.Router();
 
@@ -33,28 +34,31 @@ router.get('/', [
 
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
     // Build filter object
-    const filter = { 
-      'availability.isAvailable': true,
+    const where = { 
       status: 'active'
     };
 
     if (req.query.category) {
-      filter.category = req.query.category;
+      where.category = req.query.category;
     }
 
-    if (req.query.minPriceHour || req.query.maxPriceHour) {
-      filter.pricePerHour = {};
-      if (req.query.minPriceHour) filter.pricePerHour.$gte = parseFloat(req.query.minPriceHour);
-      if (req.query.maxPriceHour) filter.pricePerHour.$lte = parseFloat(req.query.maxPriceHour);
+    if (req.query.minPriceHour) {
+      where.pricePerHour = { ...where.pricePerHour, [Op.gte]: parseFloat(req.query.minPriceHour) };
+    }
+    
+    if (req.query.maxPriceHour) {
+      where.pricePerHour = { ...where.pricePerHour, [Op.lte]: parseFloat(req.query.maxPriceHour) };
     }
 
-    if (req.query.minPriceDay || req.query.maxPriceDay) {
-      filter.pricePerDay = {};
-      if (req.query.minPriceDay) filter.pricePerDay.$gte = parseFloat(req.query.minPriceDay);
-      if (req.query.maxPriceDay) filter.pricePerDay.$lte = parseFloat(req.query.maxPriceDay);
+    if (req.query.minPriceDay) {
+      where.pricePerDay = { ...where.pricePerDay, [Op.gte]: parseFloat(req.query.minPriceDay) };
+    }
+    
+    if (req.query.maxPriceDay) {
+      where.pricePerDay = { ...where.pricePerDay, [Op.lte]: parseFloat(req.query.maxPriceDay) };
     }
 
     if (req.query.city) {
@@ -69,38 +73,44 @@ router.get('/', [
       filter.$text = { $search: req.query.search };
     }
 
-    // Build sort object
-    let sort = {};
+    // Build order array
+    let order = [];
     switch (req.query.sort) {
       case 'price_hour_asc':
-        sort = { pricePerHour: 1 };
+        order = [['pricePerHour', 'ASC']];
         break;
       case 'price_hour_desc':
-        sort = { pricePerHour: -1 };
+        order = [['pricePerHour', 'DESC']];
         break;
       case 'price_day_asc':
-        sort = { pricePerDay: 1 };
+        order = [['pricePerDay', 'ASC']];
         break;
       case 'price_day_desc':
-        sort = { pricePerDay: -1 };
+        order = [['pricePerDay', 'DESC']];
         break;
       case 'rating':
-        sort = { 'rating.average': -1 };
+        order = [['rating', 'DESC']];
         break;
       case 'newest':
-        sort = { createdAt: -1 };
+        order = [['createdAt', 'DESC']];
         break;
       default:
-        sort = { featured: -1, 'rating.average': -1 };
+        order = [['featured', 'DESC'], ['rating', 'DESC']];
     }
 
-    const vehicles = await Vehicle.find(filter)
-      .populate('owner', 'businessName rating contact')
-      .sort(sort)
-      .skip(skip)
-      .limit(limit);
-
-    const total = await Vehicle.countDocuments(filter);
+    const { count, rows: vehicles } = await Vehicle.findAndCountAll({
+      where,
+      include: [
+        {
+          model: Partner,
+          as: 'owner',
+          attributes: ['businessName', 'rating', 'contact']
+        }
+      ],
+      order,
+      offset,
+      limit
+    });
 
     res.json({
       success: true,
@@ -108,8 +118,8 @@ router.get('/', [
       pagination: {
         page,
         limit,
-        total,
-        pages: Math.ceil(total / limit)
+        total: count,
+        pages: Math.ceil(count / limit)
       }
     });
   } catch (error) {
@@ -126,9 +136,15 @@ router.get('/', [
 // @access  Public
 router.get('/:id', async (req, res) => {
   try {
-    const vehicle = await Vehicle.findById(req.params.id)
-      .populate('owner', 'businessName contact rating address')
-      .populate('reviews');
+    const vehicle = await Vehicle.findByPk(req.params.id, {
+      include: [
+        {
+          model: Partner,
+          as: 'owner',
+          attributes: ['businessName', 'contact', 'rating', 'address']
+        }
+      ]
+    });
 
     if (!vehicle) {
       return res.status(404).json({
@@ -143,12 +159,6 @@ router.get('/:id', async (req, res) => {
     });
   } catch (error) {
     console.error('Get vehicle error:', error);
-    if (error.name === 'CastError') {
-      return res.status(404).json({
-        success: false,
-        message: 'Vehicle not found'
-      });
-    }
     res.status(500).json({
       success: false,
       message: 'Server error while fetching vehicle'
@@ -181,11 +191,19 @@ router.post('/', [auth, partnerAuth], [
 
     const vehicleData = {
       ...req.body,
-      owner: req.user.partnerId
+      ownerId: req.user.partnerId
     };
 
     const vehicle = await Vehicle.create(vehicleData);
-    await vehicle.populate('owner', 'businessName rating');
+    await vehicle.reload({
+      include: [
+        {
+          model: Partner,
+          as: 'owner',
+          attributes: ['businessName', 'rating']
+        }
+      ]
+    });
 
     res.status(201).json({
       success: true,
@@ -206,7 +224,7 @@ router.post('/', [auth, partnerAuth], [
 // @access  Private (Partner)
 router.put('/:id', [auth, partnerAuth], async (req, res) => {
   try {
-    const vehicle = await Vehicle.findById(req.params.id);
+    const vehicle = await Vehicle.findByPk(req.params.id);
 
     if (!vehicle) {
       return res.status(404).json({
@@ -216,23 +234,28 @@ router.put('/:id', [auth, partnerAuth], async (req, res) => {
     }
 
     // Check if user owns this vehicle
-    if (vehicle.owner.toString() !== req.user.partnerId.toString()) {
+    if (vehicle.ownerId !== req.user.partnerId) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to update this vehicle'
       });
     }
 
-    const updatedVehicle = await Vehicle.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true, runValidators: true }
-    ).populate('owner', 'businessName rating');
+    await vehicle.update(req.body);
+    await vehicle.reload({
+      include: [
+        {
+          model: Partner,
+          as: 'owner',
+          attributes: ['businessName', 'rating']
+        }
+      ]
+    });
 
     res.json({
       success: true,
       message: 'Vehicle updated successfully',
-      data: updatedVehicle
+      data: vehicle
     });
   } catch (error) {
     console.error('Update vehicle error:', error);
@@ -248,7 +271,7 @@ router.put('/:id', [auth, partnerAuth], async (req, res) => {
 // @access  Private (Partner)
 router.delete('/:id', [auth, partnerAuth], async (req, res) => {
   try {
-    const vehicle = await Vehicle.findById(req.params.id);
+    const vehicle = await Vehicle.findByPk(req.params.id);
 
     if (!vehicle) {
       return res.status(404).json({
@@ -258,14 +281,14 @@ router.delete('/:id', [auth, partnerAuth], async (req, res) => {
     }
 
     // Check if user owns this vehicle
-    if (vehicle.owner.toString() !== req.user.partnerId.toString()) {
+    if (vehicle.ownerId !== req.user.partnerId) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to delete this vehicle'
       });
     }
 
-    await Vehicle.findByIdAndDelete(req.params.id);
+    await vehicle.destroy();
 
     res.json({
       success: true,
@@ -299,7 +322,7 @@ router.post('/:id/availability', [auth, partnerAuth], [
       });
     }
 
-    const vehicle = await Vehicle.findById(req.params.id);
+    const vehicle = await Vehicle.findByPk(req.params.id);
 
     if (!vehicle) {
       return res.status(404).json({
@@ -309,19 +332,18 @@ router.post('/:id/availability', [auth, partnerAuth], [
     }
 
     // Check if user owns this vehicle
-    if (vehicle.owner.toString() !== req.user.partnerId.toString()) {
+    if (vehicle.ownerId !== req.user.partnerId) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to update this vehicle'
       });
     }
 
-    vehicle.availability = {
-      ...vehicle.availability,
+    const availabilityData = {
       ...req.body
     };
 
-    await vehicle.save();
+    await vehicle.update({ availability: availabilityData });
 
     res.json({
       success: true,
@@ -342,7 +364,12 @@ router.post('/:id/availability', [auth, partnerAuth], [
 // @access  Public
 router.get('/categories/list', async (req, res) => {
   try {
-    const categories = await Vehicle.distinct('category');
+    const vehicles = await Vehicle.findAll({
+      attributes: ['category'],
+      group: ['category']
+    });
+    
+    const categories = vehicles.map(v => v.category);
     
     res.json({
       success: true,
